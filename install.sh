@@ -53,6 +53,16 @@ if [[ -z "$ADMIN_PASSWORD" ]]; then
   fi
 fi
 
+# If the requested panel port is already taken on this box (e.g. a leftover
+# nginx/landing page on 8080), walk up to the next free port instead of
+# crash-looping the panel service after install.
+port_in_use() { ss -ltn 2>/dev/null | grep -q ":$1[[:space:]]"; }
+if port_in_use "$PANEL_PORT"; then
+  _orig="$PANEL_PORT"
+  while port_in_use "$PANEL_PORT"; do PANEL_PORT=$((PANEL_PORT + 1)); done
+  warn "Port $_orig is already in use on this server — the panel will use port $PANEL_PORT instead."
+fi
+
 PUBLIC_IP="$(curl -4 -s --max-time 8 https://api.ipify.org || true)"
 
 # ---------------------------------------------------------------- packages
