@@ -112,6 +112,24 @@ def main():
         status, _, _ = req("GET", f"/sub/{token}")
         assert status == 404, "disabled user's subscription still active"
 
+        # Danger zone: the admin page must carry the uninstall form, and the
+        # endpoint must refuse cleanly — wrong confirmation word first…
+        assert "action=/uninstall" in admin and "name=confirm" in admin, \
+            "danger-zone uninstall form missing from admin page"
+        form = urllib.parse.urlencode({"csrf": csrf, "confirm": "yes"})
+        status, _, body = req("POST", "/uninstall", form, cookie)
+        assert status == 400 and "not confirmed" in body.lower(), \
+            f"uninstall with wrong confirmation should be refused, got {status}"
+        # …then a correct confirmation in this throwaway env, where no
+        # uninstall.sh was installed next to the panel: it must fail with
+        # the clear "not found" page and remove nothing.
+        form = urllib.parse.urlencode({"csrf": csrf, "confirm": "UNINSTALL"})
+        status, _, body = req("POST", "/uninstall", form, cookie)
+        assert status == 500 and "Uninstaller not found" in body, \
+            f"uninstall without the script should fail cleanly, got {status}"
+        assert os.path.exists(os.path.join(tmp, "panel", "settings.json")), \
+            "refused uninstall removed panel data"
+
         print("PANEL TEST: all assertions passed")
     finally:
         proc.terminate()

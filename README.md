@@ -71,6 +71,14 @@ Useful env vars: `MDV_PANEL_PORT` (default `8080`), `MDV_ENCRYPTION_METHOD` (def
 
 Open the panel at `http://YOUR_VPS_IP:8080` and sign in.
 
+**Terminal menu:** the repo ships a small management menu — handy for restarts and removal without remembering commands:
+
+```bash
+sudo bash menu.sh
+```
+
+It offers: **1)** Install / reinstall, **2)** Restart services, **3)** Service status, **4)** Show panel info (URL/port, base domain, nameserver, user count), **5)** Uninstall (typed confirmation), **0)** Exit. The installer also copies it to `/opt/masterdns-panel/menu.sh` on the server, so it works there too.
+
 ## 3. Create a user and connect
 
 1. In the panel, **Create user**: name, optional expiry, and the **resolvers** that user should connect through (presets and/or custom — this is where an ISP resolver for free-data DNS goes).
@@ -125,9 +133,14 @@ python3 tests/e2e_local.py    # REAL upstream server+client binaries + panel-gen
 
 ## 7. Uninstall
 
+Three ways, all running the same `uninstall.sh` (which keeps a backup of users/settings under `/root/`):
+
 ```bash
-sudo bash uninstall.sh   # keeps a backup of users/settings under /root/
+sudo bash uninstall.sh   # from the repo checkout
 ```
+
+- **Terminal menu:** `sudo bash menu.sh` → option **5** (asks you to type `UNINSTALL`).
+- **From the web panel:** at the bottom of the admin page, the **Danger zone — uninstall** section has an *Uninstall panel & server* button. Type `UNINSTALL` to confirm; the panel then launches the uninstaller in the background (the installer copies `uninstall.sh` next to `app.py` for exactly this) and the panel goes offline a few seconds later.
 
 ## How it works / credits
 

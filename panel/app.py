@@ -47,6 +47,8 @@ import json
 import os
 import re
 import secrets
+import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -63,6 +65,11 @@ TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 SETTINGS_FILE = os.path.join(PANEL_HOME, "settings.json")
 USERS_FILE = os.path.join(PANEL_HOME, "users.json")
+# The uninstaller + a request marker live in PANEL_HOME: install.sh copies
+# uninstall.sh next to app.py so the panel's danger-zone button can run it.
+UNINSTALLER_PATH = os.path.join(PANEL_HOME, "uninstall.sh")
+UNINSTALL_MARKER = os.path.join(PANEL_HOME, "uninstall.trigger")
+UNINSTALL_LOG = "/tmp/masterdns-panel-uninstall.log"
 SERVER_CONFIG = os.path.join(SERVER_DIR, "server_config.toml")
 SERVER_KEY_FILE = os.path.join(SERVER_DIR, "encrypt_key.txt")
 
@@ -461,6 +468,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._user_action(form)
         if path == "/settings":
             return self._settings_save(form)
+        if path == "/uninstall":
+            return self._uninstall(form)
         if path == "/restart":
             sync_server(restart=True)
             return self._redirect("/admin")
@@ -632,7 +641,19 @@ class Handler(BaseHTTPRequestHandler):
         <p class=small>All users share the server's single encryption key — that is an upstream
         MasterDnsVPN design (one <code>encrypt_key.txt</code> per server). A user is revoked by
         disabling/deleting them here: their tunnel domain is removed from the server config and
-        their link stops working.</p></div>"""
+        their link stops working.</p></div>
+
+        <div class=card style='border-color:#7a3030'><h2 style='margin-top:0;color:#ff9a9a'>Danger zone — uninstall</h2>
+        <p class=small>Removes MasterDnsVPN + this panel from the server: both systemd services are
+        stopped and removed, and <code>/opt/masterdns</code> + <code>/opt/masterdns-panel</code> are
+        deleted. A backup of users/settings is kept under <code>/root/</code>. Cloudflare DNS records
+        are not touched. This runs the same <code>uninstall.sh</code> as the terminal uninstall —
+        there is no undo from here; you would reinstall from the repo.</p>
+        <form method=post action=/uninstall onsubmit="return confirm('Really uninstall MasterDNS Panel and the MasterDnsVPN server from this VPS?')">
+        <input type=hidden name=csrf value='{csrf}'>
+        <label>Type <code>UNINSTALL</code> to confirm</label>
+        <input name=confirm placeholder='UNINSTALL' autocomplete=off>
+        <p><button class=danger>Uninstall panel &amp; server</button></p></form></div>"""
         return self._send(page("MasterDNS Panel", body))
 
     def _preset_checks(self, selected):
@@ -708,6 +729,60 @@ class Handler(BaseHTTPRequestHandler):
         save_settings(settings)
         sync_server()
         return self._redirect("/admin")
+
+    def _uninstall(self, form):
+        # Reached only via do_POST, which has already required a login and
+        # verified the CSRF token — the same protection as every admin form.
+        # All removal work is delegated to uninstall.sh (repo root, copied
+        # into PANEL_HOME by install.sh); nothing is duplicated here.
+        if (form.getvalue("confirm") or "").strip() != "UNINSTALL":
+            return self._send(page("Uninstall — MasterDNS Panel", """<h1>Uninstall not confirmed</h1>
+            <div class=card><p class=bad>You must type <code>UNINSTALL</code> in the confirmation
+            field to remove the panel. Nothing was removed.</p>
+            <p><a class='btn ghost' href='/admin'>Back to the panel</a></p></div>"""), status=400)
+        if not os.path.isfile(UNINSTALLER_PATH):
+            return self._send(page("Uninstall — MasterDNS Panel", f"""<h1>Uninstaller not found</h1>
+            <div class=card><p class=bad>The uninstaller script is missing on this server:
+            <code>{html.escape(UNINSTALLER_PATH)}</code> — nothing was removed.</p>
+            <p>Copy <code>uninstall.sh</code> from the repo next to <code>app.py</code> and try
+            again, or uninstall from a terminal instead: <code>sudo bash uninstall.sh</code>
+            in the repo checkout (or <code>sudo bash menu.sh</code> → Uninstall).</p>
+            <p><a class='btn ghost' href='/admin'>Back to the panel</a></p></div>"""), status=500)
+        # Marker recording that the uninstall was triggered from the panel.
+        try:
+            with open(UNINSTALL_MARKER, "w", encoding="utf-8") as fh:
+                fh.write("uninstall requested from the web panel at "
+                         + time.strftime("%Y-%m-%d %H:%M:%S") + "\n")
+        except OSError:
+            pass  # best-effort — the uninstall itself is what matters
+        # Launch detached so this HTTP response completes first: a short
+        # sleep lets the page reach the browser before the uninstaller stops
+        # this very service. systemd-run puts the job in its own transient
+        # unit, outside this service's cgroup, so it survives the panel
+        # being stopped; the setsid fallback does the same without systemd.
+        inner = f"sleep 2; exec /bin/bash {shlex.quote(UNINSTALLER_PATH)}"
+        launched = False
+        if shutil.which("systemd-run"):
+            try:
+                proc = subprocess.run(
+                    ["systemd-run", "--unit",
+                     f"masterdns-uninstall-{int(time.time())}",
+                     "/bin/bash", "-c", inner],
+                    capture_output=True, text=True, timeout=15)
+                launched = proc.returncode == 0
+            except Exception:
+                launched = False
+        if not launched:
+            with open(UNINSTALL_LOG, "ab") as log:
+                subprocess.Popen(["/bin/bash", "-c", inner],
+                                 stdin=subprocess.DEVNULL, stdout=log,
+                                 stderr=log, start_new_session=True)
+        return self._send(page("Uninstalling — MasterDNS Panel", """<h1>Uninstall started</h1>
+        <div class=card><p>The uninstaller is now running on the server: it stops and removes
+        <code>masterdnsvpn</code> and <code>masterdns-panel</code> (this panel) and deletes
+        their files. A backup of your users/settings is kept under <code>/root/</code>.</p>
+        <p><b>This page will stop working in a few seconds</b> — that is expected; it means
+        the uninstall is doing its job.</p></div>"""))
 
 
 # --------------------------------------------------------------------------

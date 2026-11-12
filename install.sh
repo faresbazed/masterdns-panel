@@ -132,6 +132,11 @@ say "Installing the panel…"
 mkdir -p "$PANEL_DIR"
 install -m 0644 "$SCRIPT_DIR/panel/app.py" "$PANEL_DIR/app.py"
 install -m 0644 "$SCRIPT_DIR/panel/server_config.template.toml" "$PANEL_DIR/server_config.template.toml"
+# uninstall.sh is copied so the web panel's danger-zone Uninstall button can
+# run it after install; menu.sh is copied so the terminal menu is available
+# on the box too (sudo bash /opt/masterdns-panel/menu.sh).
+install -m 0755 "$SCRIPT_DIR/uninstall.sh" "$PANEL_DIR/uninstall.sh"
+install -m 0755 "$SCRIPT_DIR/menu.sh" "$PANEL_DIR/menu.sh"
 
 MDV_HOME="$PANEL_DIR" MDV_SERVER_DIR="$SERVER_DIR" MDV_RESTART_CMD="" \
   python3 "$PANEL_DIR/app.py" init \
