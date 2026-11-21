@@ -163,6 +163,16 @@ def make_key(method):
 # link builders  (the heart of the panel — keep in sync with the docs)
 # --------------------------------------------------------------------------
 
+def normalize_domain(domain):
+    domain = domain.strip().lower().removesuffix(".")
+    labels = domain.split(".")
+    if (len(domain) > 253 or len(labels) < 2 or
+            any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                for label in labels)):
+        raise ValueError("Invalid DNS hostname")
+    return domain
+
+
 def user_domain(settings, user):
     return user.get("custom_domain") or f"{user['slug']}.{settings['base_domain']}"
 
@@ -729,7 +739,12 @@ class Handler(BaseHTTPRequestHandler):
         if not name:
             return self._redirect("/admin")
         taken = taken_domains(settings, users)
-        custom_domain = (form.getvalue("custom_domain") or "").strip().lower().rstrip(".") or None
+        custom_domain = (form.getvalue("custom_domain") or "").strip() or None
+        try:
+            if custom_domain:
+                custom_domain = normalize_domain(custom_domain)
+        except ValueError as exc:
+            return self._send(str(exc), 400, "text/plain")
         if custom_domain in taken:
             return self._send(page("Create user — MasterDNS Panel", f"""<h1>User not created</h1>
             <div class=card><p class=bad>The tunnel domain <code>{html.escape(custom_domain)}</code>
@@ -741,6 +756,10 @@ class Handler(BaseHTTPRequestHandler):
         while slug in slugs or f"{slug}.{settings['base_domain'].rstrip('.')}" in taken:
             slug = f"{base_slug}-{n}"
             n += 1
+        try:
+            normalize_domain(custom_domain or f"{slug}.{settings['base_domain']}")
+        except ValueError as exc:
+            return self._send(str(exc), 400, "text/plain")
         user = {
             "id": secrets.token_hex(6),
             "name": name,
@@ -783,8 +802,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def _settings_save(self, form):
         settings = load_settings()
-        settings["base_domain"] = (form.getvalue("base_domain") or settings["base_domain"]).strip().lower()
-        settings["ns_host"] = (form.getvalue("ns_host") or settings["ns_host"]).strip().lower()
+        try:
+            for field in ("base_domain", "ns_host"):
+                settings[field] = normalize_domain(form.getvalue(field) or settings[field])
+            normalize_domain(f"setup.{settings['base_domain']}")
+            for user in load_users():
+                normalize_domain(user_domain(settings, user))
+        except ValueError as exc:
+            return self._send(str(exc), 400, "text/plain")
         settings["server_ip"] = (form.getvalue("server_ip") or "").strip()
         method = int(form.getvalue("encryption_method") or settings["encryption_method"])
         if method != int(settings["encryption_method"]):
@@ -854,12 +879,15 @@ class Handler(BaseHTTPRequestHandler):
 # --------------------------------------------------------------------------
 
 def cmd_init(args):
+    base_domain = normalize_domain(args.base_domain)
+    ns_host = normalize_domain(args.ns_host)
+    normalize_domain(f"setup.{base_domain}")
     os.makedirs(PANEL_HOME, exist_ok=True)
     os.makedirs(SERVER_DIR, exist_ok=True)
     method = int(args.encryption_method)
     settings = {
-        "base_domain": args.base_domain.strip().lower(),
-        "ns_host": args.ns_host.strip().lower(),
+        "base_domain": base_domain,
+        "ns_host": ns_host,
         "server_ip": args.server_ip or "",
         "encryption_method": method,
         "key": make_key(method),
