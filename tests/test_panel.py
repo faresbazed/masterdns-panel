@@ -9,6 +9,7 @@ tunnel domain disappears from the server config (that is the revocation).
 """
 import base64
 import http.client
+import importlib.util
 import json
 import os
 import re
@@ -17,10 +18,86 @@ import sys
 import tempfile
 import time
 import urllib.parse
+import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "panel", "app.py")
 PORT = 18099
+
+
+class ExpiryTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("panel_app", APP)
+        self.app = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.app)
+        tmp = tempfile.TemporaryDirectory(prefix="mdv-expiry-test-")
+        self.addCleanup(tmp.cleanup)
+        paths = mock.patch.multiple(
+            self.app, SERVER_DIR=tmp.name,
+            SERVER_CONFIG=os.path.join(tmp.name, "server_config.toml"),
+            SERVER_KEY_FILE=os.path.join(tmp.name, "encrypt_key.txt"),
+            SETTINGS_FILE=os.path.join(tmp.name, "settings.json"),
+            USERS_FILE=os.path.join(tmp.name, "users.json"), RESTART_CMD="true")
+        paths.start()
+        self.addCleanup(paths.stop)
+        self.app.save_settings({"base_domain": "example.com", "key": "a" * 32,
+                                "encryption_method": 5})
+        self.app.save_users([{"slug": "expires", "expiry": "2030-01-01"}])
+        clock = mock.patch.object(self.app.time, "strftime", return_value="2030-01-01")
+        self.clock = clock.start()
+        self.addCleanup(clock.stop)
+        self.assertTrue(self.app.sync_server(restart=False))
+
+    def test_expiry_removes_domain_and_restarts(self):
+        with open(self.app.SERVER_CONFIG) as fh:
+            self.assertIn("expires.example.com", fh.read())
+        self.clock.return_value = "2030-01-02"
+        with mock.patch.object(self.app.subprocess, "run") as restart:
+            restart.return_value.returncode = 0
+            self.assertTrue(self.app.sync_if_stale())
+            restart.assert_called_once_with("true", shell=True, capture_output=True,
+                                            text=True, timeout=30)
+        with open(self.app.SERVER_CONFIG) as fh:
+            config = fh.read()
+        self.assertNotIn("expires.example.com", config)
+        self.assertIn('DOMAIN = ["setup.example.com"]', config)
+
+    def test_unchanged_config_does_not_sync_or_restart(self):
+        with mock.patch.object(self.app, "sync_server") as sync, \
+                mock.patch.object(self.app.subprocess, "run") as restart:
+            self.assertFalse(self.app.sync_if_stale())
+            sync.assert_not_called()
+            restart.assert_not_called()
+
+    def test_missing_config_is_synced(self):
+        os.remove(self.app.SERVER_CONFIG)
+        with mock.patch.object(self.app.subprocess, "run") as restart:
+            restart.return_value.returncode = 0
+            self.assertTrue(self.app.sync_if_stale())
+            restart.assert_called_once()
+        self.assertTrue(os.path.exists(self.app.SERVER_CONFIG))
+
+    def test_failed_restart_is_retried(self):
+        self.clock.return_value = "2030-01-02"
+        with mock.patch.object(self.app.subprocess, "run") as restart:
+            restart.return_value.returncode = 1
+            restart.return_value.stderr = "restart failed"
+            self.assertFalse(self.app.sync_if_stale())
+            restart.return_value.returncode = 0
+            self.assertTrue(self.app.sync_if_stale())
+            self.assertEqual(restart.call_count, 2)
+
+    def test_watcher_continues_after_error(self):
+        with mock.patch.object(self.app, "sync_if_stale",
+                               side_effect=[OSError("read failed"), False]) as sync, \
+                mock.patch.object(self.app.time, "sleep",
+                                  side_effect=[None, None, KeyboardInterrupt]) as sleep:
+            with self.assertRaises(KeyboardInterrupt):
+                self.app.watch_expiry()
+            self.assertEqual(sync.call_count, 2)
+            sleep.assert_called_with(self.app.EXPIRY_CHECK_INTERVAL)
+        self.assertIn("read failed", self.app.LAST_SYNC["message"])
 
 
 def req(method, path, body=None, cookie=None):
@@ -137,4 +214,8 @@ def main():
 
 
 if __name__ == "__main__":
+    result = unittest.TextTestRunner(verbosity=2).run(
+        unittest.defaultTestLoader.loadTestsFromTestCase(ExpiryTests))
+    if not result.wasSuccessful():
+        sys.exit(1)
     main()

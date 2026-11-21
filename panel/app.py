@@ -51,6 +51,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import zipfile
@@ -98,6 +99,7 @@ DEFAULT_RESOLVERS = (RESOLVER_PRESETS["Google"] + RESOLVER_PRESETS["Cloudflare"]
 
 SESSIONS = {}  # token -> {"csrf": str, "expires": float}
 LAST_SYNC = {"ok": None, "message": "server config not synced yet this run"}
+EXPIRY_CHECK_INTERVAL = 60
 
 
 # --------------------------------------------------------------------------
@@ -270,6 +272,27 @@ def sync_server(restart=True):
     except Exception as exc:  # panel must stay up even if the service is not installed yet
         LAST_SYNC.update(ok=False, message=f"sync failed: {exc}")
     return LAST_SYNC["ok"]
+
+
+def sync_if_stale():
+    expected = render_server_config(load_settings(), load_users())
+    try:
+        with open(SERVER_CONFIG, "r", encoding="utf-8") as fh:
+            current = fh.read()
+    except FileNotFoundError:
+        current = None
+    if current == expected and LAST_SYNC["ok"] is not False:
+        return False
+    return sync_server(restart=True)
+
+
+def watch_expiry():
+    while True:
+        time.sleep(EXPIRY_CHECK_INTERVAL)
+        try:
+            sync_if_stale()
+        except Exception as exc:
+            LAST_SYNC.update(ok=False, message=f"expiry check failed: {exc}")
 
 
 def user_expired(user):
@@ -816,6 +839,7 @@ def cmd_serve(args):
         sys.exit("Panel is not initialised — run `app.py init ...` first (install.sh does this).")
     sync_server(restart=False)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
+    threading.Thread(target=watch_expiry, daemon=True).start()
     print(f"MasterDNS Panel listening on http://{args.host}:{args.port}")
     try:
         server.serve_forever()
