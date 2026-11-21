@@ -112,6 +112,36 @@ def main():
         status, _, _ = req("GET", f"/sub/{token}")
         assert status == 404, "disabled user's subscription still active"
 
+        # A user must never be given the nameserver's own host or another
+        # user's domain: either would put a duplicate in DOMAIN and ask for an
+        # NS record that breaks delegation for everyone.
+        def server_domains():
+            cfg = open(os.path.join(tmp, "server", "server_config.toml")).read()
+            return re.search(r'^DOMAIN = \[(.*)\]$', cfg, re.M).group(1)
+
+        form = urllib.parse.urlencode({"csrf": csrf, "name": "NS", "presets": "Google"})
+        status, _, _ = req("POST", "/users/create", form, cookie)
+        assert status == 303, f"create status {status}"
+        assert server_domains() == '"ns-2.example.com"', \
+            f"user named NS got the nameserver host: DOMAIN = [{server_domains()}]"
+
+        for taken in ("ns.example.com", "NS.Example.com.", "test-user.example.com"):
+            form = urllib.parse.urlencode({"csrf": csrf, "name": "Clash", "presets": "Google",
+                                           "custom_domain": taken})
+            status, _, body = req("POST", "/users/create", form, cookie)
+            assert status == 400 and "already in use" in body, \
+                f"custom domain {taken!r} should be refused, got {status}"
+        status, _, admin = req("GET", "/admin", cookie=cookie)
+        assert "Clash" not in admin, "refused user was still created"
+
+        form = urllib.parse.urlencode({"csrf": csrf, "name": "Custom", "presets": "Google",
+                                       "custom_domain": "alice.example.com"})
+        assert req("POST", "/users/create", form, cookie)[0] == 303
+        form = urllib.parse.urlencode({"csrf": csrf, "name": "Alice", "presets": "Google"})
+        assert req("POST", "/users/create", form, cookie)[0] == 303
+        assert server_domains() == '"ns-2.example.com", "alice.example.com", "alice-2.example.com"', \
+            f"auto slug collided with another user's custom domain: DOMAIN = [{server_domains()}]"
+
         # Danger zone: the admin page must carry the uninstall form, and the
         # endpoint must refuse cleanly — wrong confirmation word first…
         assert "action=/uninstall" in admin and "name=confirm" in admin, \
