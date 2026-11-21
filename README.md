@@ -108,7 +108,7 @@ The client sends its DNS-tunnel queries *to the resolvers*; the resolvers forwar
 
 - **Disable** — the user's domain is removed from the server and their subscription/share links return 404. Re-enable any time.
 - **Delete** — same, permanently.
-- **Expiry date** — expired users are dropped from the server config at the next sync and their subscription stops working.
+- **Expiry date** — users expire the day after their expiry date and are dropped automatically from the server config within about a minute while the panel is running; their subscription stops working on expiry.
 - **Change resolvers** — edit on the user's card; the links update instantly (resolvers are client-side, no server restart needed).
 - **Encryption method** (Server settings) — changing it generates a *new key* and re-issues every link; all users must re-import.
 

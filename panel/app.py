@@ -51,6 +51,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import zipfile
@@ -98,6 +99,9 @@ DEFAULT_RESOLVERS = (RESOLVER_PRESETS["Google"] + RESOLVER_PRESETS["Cloudflare"]
 
 SESSIONS = {}  # token -> {"csrf": str, "expires": float}
 LAST_SYNC = {"ok": None, "message": "server config not synced yet this run"}
+EXPIRY_CHECK_INTERVAL = 60
+APPLIED_CONFIG = None
+SYNC_LOCK = threading.RLock()
 
 
 # --------------------------------------------------------------------------
@@ -251,6 +255,12 @@ def render_server_config(settings, users):
 
 
 def sync_server(restart=True):
+    with SYNC_LOCK:
+        return _sync_server(restart)
+
+
+def _sync_server(restart):
+    global APPLIED_CONFIG
     settings, users = load_settings(), load_users()
     try:
         os.makedirs(SERVER_DIR, exist_ok=True)
@@ -264,18 +274,47 @@ def sync_server(restart=True):
             with open(SERVER_KEY_FILE, "w", encoding="utf-8") as fh:
                 fh.write(settings["key"])
             os.chmod(SERVER_KEY_FILE, 0o600)
+        config = render_server_config(settings, users)
         with open(SERVER_CONFIG, "w", encoding="utf-8") as fh:
-            fh.write(render_server_config(settings, users))
+            fh.write(config)
         if restart and RESTART_CMD:
             proc = subprocess.run(RESTART_CMD, shell=True, capture_output=True,
                                   text=True, timeout=30)
             if proc.returncode != 0:
                 raise RuntimeError((proc.stderr or proc.stdout or "restart failed").strip())
+        if restart:
+            APPLIED_CONFIG = config
         LAST_SYNC.update(ok=True, message="server config synced"
                          + (" and service restarted" if restart and RESTART_CMD else ""))
     except Exception as exc:  # panel must stay up even if the service is not installed yet
         LAST_SYNC.update(ok=False, message=f"sync failed: {exc}")
     return LAST_SYNC["ok"]
+
+
+def sync_if_stale():
+    with SYNC_LOCK:
+        return _sync_if_stale()
+
+
+def _sync_if_stale():
+    expected = render_server_config(load_settings(), load_users())
+    try:
+        with open(SERVER_CONFIG, "r", encoding="utf-8") as fh:
+            current = fh.read()
+    except FileNotFoundError:
+        current = None
+    if current == expected == APPLIED_CONFIG and LAST_SYNC["ok"] is not False:
+        return False
+    return sync_server(restart=True)
+
+
+def watch_expiry():
+    while True:
+        time.sleep(EXPIRY_CHECK_INTERVAL)
+        try:
+            sync_if_stale()
+        except Exception as exc:
+            LAST_SYNC.update(ok=False, message=f"expiry check failed: {exc}")
 
 
 def user_expired(user):
@@ -837,10 +876,17 @@ def cmd_init(args):
 
 
 def cmd_serve(args):
+    global APPLIED_CONFIG
     if not os.path.exists(SETTINGS_FILE):
         sys.exit("Panel is not initialised — run `app.py init ...` first (install.sh does this).")
+    try:
+        with open(SERVER_CONFIG, "r", encoding="utf-8") as fh:
+            APPLIED_CONFIG = fh.read()
+    except FileNotFoundError:
+        APPLIED_CONFIG = None
     sync_server(restart=False)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
+    threading.Thread(target=watch_expiry, daemon=True).start()
     print(f"MasterDNS Panel listening on http://{args.host}:{args.port}")
     try:
         server.serve_forever()

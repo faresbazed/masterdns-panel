@@ -10,18 +10,162 @@ tunnel domain disappears from the server config (that is the revocation).
 import base64
 import html
 import http.client
+import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
+import unittest
+from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "panel", "app.py")
 PORT = 18099
+
+
+class ExpiryTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("panel_app", APP)
+        self.app = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.app)
+        tmp = tempfile.TemporaryDirectory(prefix="mdv-expiry-test-")
+        self.addCleanup(tmp.cleanup)
+        paths = mock.patch.multiple(
+            self.app, SERVER_DIR=tmp.name,
+            SERVER_CONFIG=os.path.join(tmp.name, "server_config.toml"),
+            SERVER_KEY_FILE=os.path.join(tmp.name, "encrypt_key.txt"),
+            SETTINGS_FILE=os.path.join(tmp.name, "settings.json"),
+            USERS_FILE=os.path.join(tmp.name, "users.json"), RESTART_CMD="true")
+        paths.start()
+        self.addCleanup(paths.stop)
+        self.app.save_settings({"base_domain": "example.com", "key": "a" * 32,
+                                "encryption_method": 5})
+        self.app.save_users([{"slug": "expires", "expiry": "2030-01-01"}])
+        clock = mock.patch.object(self.app.time, "strftime", return_value="2030-01-01")
+        self.clock = clock.start()
+        self.addCleanup(clock.stop)
+        self.assertTrue(self.app.sync_server(restart=True))
+
+    def test_expiry_removes_domain_and_restarts(self):
+        with open(self.app.SERVER_CONFIG) as fh:
+            self.assertIn("expires.example.com", fh.read())
+        self.clock.return_value = "2030-01-02"
+        with mock.patch.object(self.app.subprocess, "run") as restart:
+            restart.return_value.returncode = 0
+            self.assertTrue(self.app.sync_if_stale())
+            restart.assert_called_once_with("true", shell=True, capture_output=True,
+                                            text=True, timeout=30)
+        with open(self.app.SERVER_CONFIG) as fh:
+            config = fh.read()
+        self.assertNotIn("expires.example.com", config)
+        self.assertIn('DOMAIN = ["setup.example.com"]', config)
+
+    def test_unchanged_config_does_not_sync_or_restart(self):
+        with mock.patch.object(self.app, "sync_server") as sync, \
+                mock.patch.object(self.app.subprocess, "run") as restart:
+            self.assertFalse(self.app.sync_if_stale())
+            sync.assert_not_called()
+            restart.assert_not_called()
+
+    def test_non_restarting_sync_does_not_hide_expiry(self):
+        self.assertTrue(self.app.sync_server(restart=True))
+        self.clock.return_value = "2030-01-02"
+        self.assertTrue(self.app.sync_server(restart=False))
+        with mock.patch.object(self.app.subprocess, "run") as restart:
+            restart.return_value.returncode = 0
+            self.assertTrue(self.app.sync_if_stale())
+            restart.assert_called_once()
+
+    def test_empty_restart_command_applies_config_once(self):
+        self.app.RESTART_CMD = ""
+        self.clock.return_value = "2030-01-02"
+        with mock.patch.object(self.app.subprocess, "run") as restart:
+            self.assertTrue(self.app.sync_if_stale())
+            self.assertFalse(self.app.sync_if_stale())
+            restart.assert_not_called()
+
+    def test_missing_config_is_synced(self):
+        os.remove(self.app.SERVER_CONFIG)
+        with mock.patch.object(self.app.subprocess, "run") as restart:
+            restart.return_value.returncode = 0
+            self.assertTrue(self.app.sync_if_stale())
+            restart.assert_called_once()
+        self.assertTrue(os.path.exists(self.app.SERVER_CONFIG))
+
+    def test_startup_preserves_pre_sync_applied_config(self):
+        with open(self.app.SERVER_CONFIG) as fh:
+            active_config = fh.read()
+        self.clock.return_value = "2030-01-02"
+        with mock.patch.object(self.app, "ThreadingHTTPServer"), \
+                mock.patch.object(self.app.threading, "Thread"):
+            self.app.cmd_serve(mock.Mock(host="127.0.0.1", port=0))
+        self.assertEqual(self.app.APPLIED_CONFIG, active_config)
+        with mock.patch.object(self.app.subprocess, "run") as restart:
+            restart.return_value.returncode = 0
+            self.assertTrue(self.app.sync_if_stale())
+            restart.assert_called_once()
+
+    def test_failed_restart_is_retried(self):
+        self.clock.return_value = "2030-01-02"
+        with mock.patch.object(self.app.subprocess, "run") as restart:
+            restart.return_value.returncode = 1
+            restart.return_value.stderr = "restart failed"
+            self.assertFalse(self.app.sync_if_stale())
+            restart.return_value.returncode = 0
+            self.assertTrue(self.app.sync_if_stale())
+            self.assertEqual(restart.call_count, 2)
+
+    def test_sync_lock_covers_load_check_and_restart(self):
+        def assert_locked():
+            acquired = []
+
+            def probe():
+                held = self.app.SYNC_LOCK.acquire(blocking=False)
+                acquired.append(held)
+                if held:
+                    self.app.SYNC_LOCK.release()
+
+            thread = threading.Thread(target=probe)
+            thread.start()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(acquired, [False])
+
+        load_settings, load_users = self.app.load_settings, self.app.load_users
+
+        def settings():
+            assert_locked()
+            return load_settings()
+
+        def users():
+            assert_locked()
+            return load_users()
+
+        def restart(*args, **kwargs):
+            assert_locked()
+            return mock.Mock(returncode=0)
+
+        self.clock.return_value = "2030-01-02"
+        with mock.patch.object(self.app, "load_settings", side_effect=settings), \
+                mock.patch.object(self.app, "load_users", side_effect=users), \
+                mock.patch.object(self.app.subprocess, "run", side_effect=restart):
+            self.assertTrue(self.app.sync_if_stale())
+
+    def test_watcher_continues_after_error(self):
+        with mock.patch.object(self.app, "sync_if_stale",
+                               side_effect=[OSError("read failed"), False]) as sync, \
+                mock.patch.object(self.app.time, "sleep",
+                                  side_effect=[None, None, KeyboardInterrupt]) as sleep:
+            with self.assertRaises(KeyboardInterrupt):
+                self.app.watch_expiry()
+            self.assertEqual(sync.call_count, 2)
+            sleep.assert_called_with(self.app.EXPIRY_CHECK_INTERVAL)
+        self.assertIn("read failed", self.app.LAST_SYNC["message"])
 
 
 def req(method, path, body=None, cookie=None):
@@ -203,4 +347,8 @@ def main():
 
 
 if __name__ == "__main__":
+    result = unittest.TextTestRunner(verbosity=2).run(
+        unittest.defaultTestLoader.loadTestsFromTestCase(ExpiryTests))
+    if not result.wasSuccessful():
+        sys.exit(1)
     main()
