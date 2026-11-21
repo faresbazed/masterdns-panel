@@ -65,6 +65,47 @@ class ExpiryTests(unittest.TestCase):
         self.assertNotIn("expires.example.com", config)
         self.assertIn('DOMAIN = ["setup.example.com"]', config)
 
+    def test_disabling_legacy_setup_domain_revokes_access(self):
+        for fields in ({"slug": "setup"},
+                       {"slug": "legacy", "custom_domain": "setup.example.com"}):
+            with self.subTest(fields=fields):
+                user = {"id": "legacy", "enabled": True, **fields}
+                self.app.save_users([user])
+                self.assertTrue(self.app.sync_server())
+                with open(self.app.SERVER_CONFIG) as fh:
+                    self.assertIn('DOMAIN = ["setup.example.com"]', fh.read())
+                handler = mock.Mock()
+                form = mock.Mock()
+                form.getvalue.side_effect = {"id": "legacy", "op": "toggle"}.get
+                self.app.Handler._user_action(handler, form)
+                self.assertTrue(self.app.LAST_SYNC["ok"])
+                with open(self.app.SERVER_CONFIG) as fh:
+                    self.assertNotIn('"setup.example.com"', fh.read())
+
+    def test_setup_name_gets_non_placeholder_domain(self):
+        settings = self.app.load_settings()
+        settings["ns_host"] = "ns.example.com"
+        self.app.save_settings(settings)
+        self.app.save_users([])
+        form = mock.Mock()
+        form.getvalue.side_effect = {"name": "Setup"}.get
+        form.getlist.return_value = []
+        self.app.Handler._user_create(mock.Mock(), form)
+        self.assertEqual(self.app.load_users()[0]["slug"], "setup-2")
+
+    def test_setup_custom_domain_is_rejected(self):
+        settings = self.app.load_settings()
+        settings["ns_host"] = "ns.example.com"
+        self.app.save_settings(settings)
+        self.app.save_users([])
+        form = mock.Mock()
+        form.getvalue.side_effect = {"name": "Custom", "custom_domain": "setup.example.com"}.get
+        form.getlist.return_value = []
+        handler = mock.Mock()
+        self.app.Handler._user_create(handler, form)
+        handler._send.assert_called_once_with(mock.ANY, status=400)
+        self.assertEqual(self.app.load_users(), [])
+
     def test_unchanged_config_does_not_sync_or_restart(self):
         with mock.patch.object(self.app, "sync_server") as sync, \
                 mock.patch.object(self.app.subprocess, "run") as restart:
