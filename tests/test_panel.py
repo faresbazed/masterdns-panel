@@ -23,9 +23,118 @@ import urllib.parse
 import unittest
 from unittest import mock
 
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "panel", "app.py")
 PORT = 18099
+
+
+class DomainTests(unittest.TestCase):
+    def assert_toml(self, config, domains=None):
+        if tomllib is not None:
+            parsed = tomllib.loads(config.decode())
+            if domains is not None:
+                self.assertEqual(parsed["DOMAIN"], domains)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="mdv-domain-test-")
+        self.addCleanup(tmp.cleanup)
+        with mock.patch.dict(os.environ, MDV_HOME=os.path.join(tmp.name, "panel"),
+                             MDV_SERVER_DIR=os.path.join(tmp.name, "server"),
+                             MDV_RESTART_CMD="true"):
+            spec = importlib.util.spec_from_file_location("panel_app", APP)
+            self.app = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(self.app)
+        self.app.cmd_init(mock.Mock(base_domain="example.com", ns_host="ns.example.com",
+                                    server_ip="127.0.0.1", encryption_method=5,
+                                    admin_password="test-pass-123"))
+        server = self.app.ThreadingHTTPServer(("127.0.0.1", 0), self.app.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(server.shutdown)
+        self.port = server.server_port
+        self.app.SESSIONS["test-session"] = {"csrf": "test-csrf", "expires": time.time() + 60}
+
+    def post(self, path, **fields):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        self.addCleanup(conn.close)
+        conn.request("POST", path, urllib.parse.urlencode(dict(csrf="test-csrf", **fields)),
+                     {"Content-Type": "application/x-www-form-urlencoded",
+                      "Cookie": "mdv_session=test-session"})
+        response = conn.getresponse()
+        response.read()
+        return response.status
+
+    def test_custom_domains(self):
+        with open(self.app.SERVER_CONFIG, "rb") as fh:
+            original = fh.read()
+        bad = ['alice.example.com"', "-alice.example.com", "alice..example.com",
+               "alice_.example.com", "localhost", "a" * 64 + ".com",
+               ".".join(["a" * 63] * 4), "alice-.example.com"]
+        for domain in bad:
+            with self.subTest(domain=domain):
+                self.assertEqual(self.post("/users/create", name="Alice", custom_domain=domain), 400)
+                with open(self.app.SERVER_CONFIG, "rb") as fh:
+                    config = fh.read()
+                self.assert_toml(config)
+                self.assertEqual(config, original)
+                self.assertNotIn(domain, config.decode())
+                self.assertEqual(self.app.load_users(), [])
+        for domain in ("Alice.Example.COM.", ""):
+            with self.subTest(valid=domain):
+                self.assertEqual(self.post("/users/create", name="Alice", custom_domain=domain), 303)
+        with open(self.app.SERVER_CONFIG, "rb") as fh:
+            config = fh.read()
+        self.assertIn(b'"alice.example.com"', config)
+        self.assert_toml(config)
+
+    def test_settings_domains(self):
+        for field in ("base_domain", "ns_host"):
+            with self.subTest(field=field):
+                settings = self.app.load_settings()
+                with open(self.app.SERVER_CONFIG, "rb") as fh:
+                    original = fh.read()
+                self.assertEqual(self.post("/settings", **{field: 'bad.example.com"'}), 400)
+                self.assertEqual(self.app.load_settings(), settings)
+                with open(self.app.SERVER_CONFIG, "rb") as fh:
+                    self.assertEqual(fh.read(), original)
+        self.assertEqual(self.post("/settings", base_domain="New.Example.COM.",
+                                   ns_host="NS.Example.COM."), 303)
+        self.assertEqual(self.app.load_settings()["base_domain"], "new.example.com")
+        self.assertEqual(self.post("/settings", base_domain="", ns_host=""), 303)
+        self.assertEqual(self.app.load_settings()["base_domain"], "new.example.com")
+        with open(self.app.SERVER_CONFIG, "rb") as fh:
+            config = fh.read()
+        self.assertIn(b'DOMAIN = ["setup.new.example.com"]', config)
+        self.assert_toml(config, ["setup.new.example.com"])
+
+    def test_domain_boundaries(self):
+        domain = ".".join(["a" * 63] * 3 + ["b" * 61])
+        self.assertEqual(len(domain), 253)
+        self.assertEqual(self.app.normalize_domain(domain), domain)
+        for invalid in ("", "example.com..", domain + "b"):
+            with self.subTest(domain=invalid), self.assertRaises(ValueError):
+                self.app.normalize_domain(invalid)
+
+    def test_init_rejects_invalid_domains_without_writing(self):
+        for field in ("base_domain", "ns_host"):
+            args = dict(base_domain="example.com", ns_host="ns.example.com",
+                        server_ip="", encryption_method=5, admin_password="password")
+            args[field] = 'bad.example.com"'
+            settings = self.app.load_settings()
+            with open(self.app.SERVER_CONFIG, "rb") as fh:
+                original = fh.read()
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.app.cmd_init(mock.Mock(**args))
+            self.assertEqual(self.app.load_settings(), settings)
+            with open(self.app.SERVER_CONFIG, "rb") as fh:
+                self.assertEqual(fh.read(), original)
 
 
 class ExpiryTests(unittest.TestCase):
@@ -416,7 +525,7 @@ def main():
 
 if __name__ == "__main__":
     result = unittest.TextTestRunner(verbosity=2).run(
-        unittest.defaultTestLoader.loadTestsFromTestCase(ExpiryTests))
+        unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__]))
     if not result.wasSuccessful():
         sys.exit(1)
     main()
