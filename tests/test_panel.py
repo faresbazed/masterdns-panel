@@ -142,6 +142,19 @@ def main():
         assert server_domains() == '"ns-2.example.com", "alice.example.com", "alice-2.example.com"', \
             f"auto slug collided with another user's custom domain: DOMAIN = [{server_domains()}]"
 
+        # A trailing dot on the stored nameserver host must not let it through.
+        settings_form = {"csrf": csrf, "base_domain": "example.com", "server_ip": "203.0.113.10",
+                         "encryption_method": "5"}
+        form = urllib.parse.urlencode(dict(settings_form, ns_host="ns.example.com."))
+        assert req("POST", "/settings", form, cookie)[0] == 303
+        form = urllib.parse.urlencode({"csrf": csrf, "name": "Clash", "presets": "Google",
+                                       "custom_domain": "ns.example.com"})
+        status, _, body = req("POST", "/users/create", form, cookie)
+        assert status == 400 and "already in use" in body, \
+            f"custom domain matching a dotted nameserver host should be refused, got {status}"
+        form = urllib.parse.urlencode(dict(settings_form, ns_host="ns.example.com"))
+        assert req("POST", "/settings", form, cookie)[0] == 303
+
         # Danger zone: the admin page must carry the uninstall form, and the
         # endpoint must refuse cleanly — wrong confirmation word first…
         assert "action=/uninstall" in admin and "name=confirm" in admin, \

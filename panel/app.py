@@ -165,7 +165,8 @@ def user_domain(settings, user):
 
 def taken_domains(settings, users):
     """Domains a new user must not get: the nameserver host and every user's domain."""
-    return {settings["ns_host"], *(user_domain(settings, u) for u in users)}
+    domains = {settings["ns_host"], *(user_domain(settings, u) for u in users)}
+    return {d.rstrip(".") for d in domains}
 
 
 def simple_link(settings, user):
@@ -686,7 +687,7 @@ class Handler(BaseHTTPRequestHandler):
         slug = slugify(form.getvalue("slug") or name)
         base_slug, n = slug, 2
         slugs = {u["slug"] for u in users}
-        while slug in slugs or f"{slug}.{settings['base_domain']}" in taken:
+        while slug in slugs or f"{slug}.{settings['base_domain'].rstrip('.')}" in taken:
             slug = f"{base_slug}-{n}"
             n += 1
         user = {
