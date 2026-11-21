@@ -47,7 +47,7 @@ class ExpiryTests(unittest.TestCase):
         clock = mock.patch.object(self.app.time, "strftime", return_value="2030-01-01")
         self.clock = clock.start()
         self.addCleanup(clock.stop)
-        self.assertTrue(self.app.sync_server(restart=False))
+        self.assertTrue(self.app.sync_server(restart=True))
 
     def test_expiry_removes_domain_and_restarts(self):
         with open(self.app.SERVER_CONFIG) as fh:
@@ -70,6 +70,15 @@ class ExpiryTests(unittest.TestCase):
             sync.assert_not_called()
             restart.assert_not_called()
 
+    def test_non_restarting_sync_does_not_hide_expiry(self):
+        self.assertTrue(self.app.sync_server(restart=True))
+        self.clock.return_value = "2030-01-02"
+        self.assertTrue(self.app.sync_server(restart=False))
+        with mock.patch.object(self.app.subprocess, "run") as restart:
+            restart.return_value.returncode = 0
+            self.assertTrue(self.app.sync_if_stale())
+            restart.assert_called_once()
+
     def test_missing_config_is_synced(self):
         os.remove(self.app.SERVER_CONFIG)
         with mock.patch.object(self.app.subprocess, "run") as restart:
@@ -77,6 +86,19 @@ class ExpiryTests(unittest.TestCase):
             self.assertTrue(self.app.sync_if_stale())
             restart.assert_called_once()
         self.assertTrue(os.path.exists(self.app.SERVER_CONFIG))
+
+    def test_startup_preserves_pre_sync_applied_config(self):
+        with open(self.app.SERVER_CONFIG) as fh:
+            active_config = fh.read()
+        self.clock.return_value = "2030-01-02"
+        with mock.patch.object(self.app, "ThreadingHTTPServer"), \
+                mock.patch.object(self.app.threading, "Thread"):
+            self.app.cmd_serve(mock.Mock(host="127.0.0.1", port=0))
+        self.assertEqual(self.app.APPLIED_CONFIG, active_config)
+        with mock.patch.object(self.app.subprocess, "run") as restart:
+            restart.return_value.returncode = 0
+            self.assertTrue(self.app.sync_if_stale())
+            restart.assert_called_once()
 
     def test_failed_restart_is_retried(self):
         self.clock.return_value = "2030-01-02"
