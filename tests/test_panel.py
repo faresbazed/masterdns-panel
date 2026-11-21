@@ -80,6 +80,14 @@ class ExpiryTests(unittest.TestCase):
             self.assertTrue(self.app.sync_if_stale())
             restart.assert_called_once()
 
+    def test_empty_restart_command_applies_config_once(self):
+        self.app.RESTART_CMD = ""
+        self.clock.return_value = "2030-01-02"
+        with mock.patch.object(self.app.subprocess, "run") as restart:
+            self.assertTrue(self.app.sync_if_stale())
+            self.assertFalse(self.app.sync_if_stale())
+            restart.assert_not_called()
+
     def test_missing_config_is_synced(self):
         os.remove(self.app.SERVER_CONFIG)
         with mock.patch.object(self.app.subprocess, "run") as restart:

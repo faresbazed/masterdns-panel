@@ -276,6 +276,7 @@ def _sync_server(restart):
                                   text=True, timeout=30)
             if proc.returncode != 0:
                 raise RuntimeError((proc.stderr or proc.stdout or "restart failed").strip())
+        if restart:
             APPLIED_CONFIG = config
         LAST_SYNC.update(ok=True, message="server config synced"
                          + (" and service restarted" if restart and RESTART_CMD else ""))
