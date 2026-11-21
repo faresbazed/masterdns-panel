@@ -16,6 +16,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import unittest
@@ -109,6 +110,42 @@ class ExpiryTests(unittest.TestCase):
             restart.return_value.returncode = 0
             self.assertTrue(self.app.sync_if_stale())
             self.assertEqual(restart.call_count, 2)
+
+    def test_sync_lock_covers_load_check_and_restart(self):
+        def assert_locked():
+            acquired = []
+
+            def probe():
+                held = self.app.SYNC_LOCK.acquire(blocking=False)
+                acquired.append(held)
+                if held:
+                    self.app.SYNC_LOCK.release()
+
+            thread = threading.Thread(target=probe)
+            thread.start()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(acquired, [False])
+
+        load_settings, load_users = self.app.load_settings, self.app.load_users
+
+        def settings():
+            assert_locked()
+            return load_settings()
+
+        def users():
+            assert_locked()
+            return load_users()
+
+        def restart(*args, **kwargs):
+            assert_locked()
+            return mock.Mock(returncode=0)
+
+        self.clock.return_value = "2030-01-02"
+        with mock.patch.object(self.app, "load_settings", side_effect=settings), \
+                mock.patch.object(self.app, "load_users", side_effect=users), \
+                mock.patch.object(self.app.subprocess, "run", side_effect=restart):
+            self.assertTrue(self.app.sync_if_stale())
 
     def test_watcher_continues_after_error(self):
         with mock.patch.object(self.app, "sync_if_stale",

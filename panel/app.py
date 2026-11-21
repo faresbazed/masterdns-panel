@@ -101,6 +101,7 @@ SESSIONS = {}  # token -> {"csrf": str, "expires": float}
 LAST_SYNC = {"ok": None, "message": "server config not synced yet this run"}
 EXPIRY_CHECK_INTERVAL = 60
 APPLIED_CONFIG = None
+SYNC_LOCK = threading.RLock()
 
 
 # --------------------------------------------------------------------------
@@ -248,6 +249,11 @@ def render_server_config(settings, users):
 
 
 def sync_server(restart=True):
+    with SYNC_LOCK:
+        return _sync_server(restart)
+
+
+def _sync_server(restart):
     global APPLIED_CONFIG
     settings, users = load_settings(), load_users()
     try:
@@ -279,6 +285,11 @@ def sync_server(restart=True):
 
 
 def sync_if_stale():
+    with SYNC_LOCK:
+        return _sync_if_stale()
+
+
+def _sync_if_stale():
     expected = render_server_config(load_settings(), load_users())
     try:
         with open(SERVER_CONFIG, "r", encoding="utf-8") as fh:
