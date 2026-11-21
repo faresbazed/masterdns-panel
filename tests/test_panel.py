@@ -106,6 +106,16 @@ class ExpiryTests(unittest.TestCase):
         handler._send.assert_called_once_with(mock.ANY, status=400)
         self.assertEqual(self.app.load_users(), [])
 
+    def test_placeholder_skips_all_existing_domains(self):
+        self.app.save_users([
+            {"slug": "setup", "enabled": False},
+            {"slug": "setup-2", "expiry": "2029-01-01"},
+            {"slug": "custom", "custom_domain": "SETUP-3.example.com.", "enabled": False},
+        ])
+        self.assertTrue(self.app.sync_server())
+        with open(self.app.SERVER_CONFIG) as fh:
+            self.assertIn('DOMAIN = ["setup-4.example.com"]', fh.read())
+
     def test_unchanged_config_does_not_sync_or_restart(self):
         with mock.patch.object(self.app, "sync_server") as sync, \
                 mock.patch.object(self.app.subprocess, "run") as restart:
