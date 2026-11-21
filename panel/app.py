@@ -292,6 +292,17 @@ def slugify(name):
     return slug or "user"
 
 
+def chosen_presets(resolvers):
+    """Presets whose every IP is in `resolvers` (ticked in the edit form)."""
+    return [name for name, ips in RESOLVER_PRESETS.items() if set(ips) <= set(resolvers)]
+
+
+def custom_resolvers(resolvers):
+    """Resolvers not covered by a chosen preset (the edit form's free-text field)."""
+    covered = {ip for name in chosen_presets(resolvers) for ip in RESOLVER_PRESETS[name]}
+    return [r for r in resolvers if r not in covered]
+
+
 def parse_resolvers(form):
     chosen = []
     for preset in form.getlist("presets"):
@@ -593,7 +604,7 @@ class Handler(BaseHTTPRequestHandler):
                 <label>Change this user's DNS resolvers — presets</label>
                 {self._preset_checks(user['resolvers'])}
                 <label>…and/or custom resolvers (IPs, comma/space separated — e.g. your ISP DNS)</label>
-                <input name=custom_resolvers value='{html.escape(' '.join(r for r in user['resolvers'] if r not in sum(RESOLVER_PRESETS.values(), [])))}'>
+                <input name=custom_resolvers value='{html.escape(' '.join(custom_resolvers(user['resolvers'])))}'>
                 <p><button class=ghost>Save resolvers &amp; regenerate links</button></p></form></div>""")
 
         preset_new = "".join(
@@ -658,8 +669,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _preset_checks(self, selected):
         out = []
+        chosen = chosen_presets(selected)
         for name, ips in RESOLVER_PRESETS.items():
-            checked = "checked" if set(ips) <= set(selected) else ""
+            checked = "checked" if name in chosen else ""
             out.append(f"<label class=check><input type=checkbox name=presets value='{html.escape(name)}' "
                        f"{checked} style='width:auto'> {html.escape(name)} ({', '.join(ips)})</label>")
         return "".join(out)

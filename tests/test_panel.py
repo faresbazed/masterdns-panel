@@ -8,6 +8,7 @@ share page + subscription endpoint, then disable the user and confirm the
 tunnel domain disappears from the server config (that is the revocation).
 """
 import base64
+import html
 import http.client
 import json
 import os
@@ -111,6 +112,28 @@ def main():
         assert "test-user.example.com" not in server_cfg, "disabled user still in server config"
         status, _, _ = req("GET", f"/sub/{token}")
         assert status == 404, "disabled user's subscription still active"
+
+        # Re-saving a user's resolvers unchanged must keep every resolver,
+        # including a lone IP from a preset whose partner was not chosen.
+        form = urllib.parse.urlencode({
+            "csrf": csrf, "name": "Partial", "custom_resolvers": "8.8.8.8 10.0.0.1",
+        })
+        status, _, _ = req("POST", "/users/create", form, cookie)
+        assert status == 303, f"create status {status}"
+        status, _, admin = req("GET", "/admin", cookie=cookie)
+        edit = re.search(r"<form method=post action=/users/update>.*?</form>",
+                         admin.split("<h2 style='margin-top:0'>Partial</h2>", 1)[1], re.S).group(0)
+        fields = [("csrf", csrf), ("id", re.search(r"name=id value='([0-9a-f]+)'", edit).group(1))]
+        fields += [("presets", html.unescape(v)) for v in
+                   re.findall(r"name=presets value='([^']+)' checked", edit)]
+        fields.append(("custom_resolvers", html.unescape(
+            re.search(r"name=custom_resolvers value='([^']*)'", edit).group(1))))
+        status, _, _ = req("POST", "/users/update", urllib.parse.urlencode(fields), cookie)
+        assert status == 303, f"update status {status}"
+        users = json.load(open(os.path.join(tmp, "panel", "users.json")))
+        partial = next(u for u in users if u["name"] == "Partial")
+        assert partial["resolvers"] == ["8.8.8.8", "10.0.0.1"], \
+            f"re-saving resolvers changed them: {partial['resolvers']}"
 
         # Danger zone: the admin page must carry the uninstall form, and the
         # endpoint must refuse cleanly — wrong confirmation word first…
