@@ -19,10 +19,14 @@ import sys
 import tempfile
 import threading
 import time
-import tomllib
 import urllib.parse
 import unittest
 from unittest import mock
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(ROOT, "panel", "app.py")
@@ -30,6 +34,12 @@ PORT = 18099
 
 
 class DomainTests(unittest.TestCase):
+    def assert_toml(self, config, domains=None):
+        if tomllib is not None:
+            parsed = tomllib.loads(config.decode())
+            if domains is not None:
+                self.assertEqual(parsed["DOMAIN"], domains)
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="mdv-domain-test-")
         self.addCleanup(tmp.cleanup)
@@ -72,7 +82,7 @@ class DomainTests(unittest.TestCase):
                 self.assertEqual(self.post("/users/create", name="Alice", custom_domain=domain), 400)
                 with open(self.app.SERVER_CONFIG, "rb") as fh:
                     config = fh.read()
-                tomllib.loads(config.decode())
+                self.assert_toml(config)
                 self.assertEqual(config, original)
                 self.assertNotIn(domain, config.decode())
                 self.assertEqual(self.app.load_users(), [])
@@ -80,8 +90,9 @@ class DomainTests(unittest.TestCase):
             with self.subTest(valid=domain):
                 self.assertEqual(self.post("/users/create", name="Alice", custom_domain=domain), 303)
         with open(self.app.SERVER_CONFIG, "rb") as fh:
-            config = tomllib.load(fh)
-        self.assertIn("alice.example.com", config["DOMAIN"])
+            config = fh.read()
+        self.assertIn(b'"alice.example.com"', config)
+        self.assert_toml(config)
 
     def test_settings_domains(self):
         for field in ("base_domain", "ns_host"):
@@ -99,7 +110,9 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(self.post("/settings", base_domain="", ns_host=""), 303)
         self.assertEqual(self.app.load_settings()["base_domain"], "new.example.com")
         with open(self.app.SERVER_CONFIG, "rb") as fh:
-            self.assertEqual(tomllib.load(fh)["DOMAIN"], ["setup.new.example.com"])
+            config = fh.read()
+        self.assertIn(b'DOMAIN = ["setup.new.example.com"]', config)
+        self.assert_toml(config, ["setup.new.example.com"])
 
     def test_domain_boundaries(self):
         domain = ".".join(["a" * 63] * 3 + ["b" * 61])
