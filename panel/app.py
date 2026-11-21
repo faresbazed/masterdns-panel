@@ -163,6 +163,12 @@ def user_domain(settings, user):
     return user.get("custom_domain") or f"{user['slug']}.{settings['base_domain']}"
 
 
+def taken_domains(settings, users):
+    """Domains a new user must not get: the nameserver host and every user's domain."""
+    domains = {settings["ns_host"], *(user_domain(settings, u) for u in users)}
+    return {d.rstrip(".") for d in domains}
+
+
 def simple_link(settings, user):
     """Canonical masterdns:// link (Hiddify + V2Box)."""
     q = urllib.parse.urlencode({
@@ -683,17 +689,24 @@ class Handler(BaseHTTPRequestHandler):
         name = (form.getvalue("name") or "").strip()
         if not name:
             return self._redirect("/admin")
+        taken = taken_domains(settings, users)
+        custom_domain = (form.getvalue("custom_domain") or "").strip().lower().rstrip(".") or None
+        if custom_domain in taken:
+            return self._send(page("Create user — MasterDNS Panel", f"""<h1>User not created</h1>
+            <div class=card><p class=bad>The tunnel domain <code>{html.escape(custom_domain)}</code>
+            is already in use by the nameserver or another user. Pick a different custom domain.</p>
+            <p><a class='btn ghost' href='/admin'>Back to the panel</a></p></div>"""), status=400)
         slug = slugify(form.getvalue("slug") or name)
         base_slug, n = slug, 2
-        existing = {u["slug"] for u in users}
-        while slug in existing:
+        slugs = {u["slug"] for u in users}
+        while slug in slugs or f"{slug}.{settings['base_domain'].rstrip('.')}" in taken:
             slug = f"{base_slug}-{n}"
             n += 1
         user = {
             "id": secrets.token_hex(6),
             "name": name,
             "slug": slug,
-            "custom_domain": (form.getvalue("custom_domain") or "").strip().lower() or None,
+            "custom_domain": custom_domain,
             "resolvers": parse_resolvers(form),
             "enabled": True,
             "expiry": (form.getvalue("expiry") or "").strip(),
