@@ -167,9 +167,14 @@ def user_domain(settings, user):
     return user.get("custom_domain") or f"{user['slug']}.{settings['base_domain']}"
 
 
+def placeholder_domain(settings):
+    return f"no-active-users-placeholder.{settings['base_domain'].rstrip('.')}"
+
+
 def taken_domains(settings, users):
-    """Domains a new user must not get: the nameserver host and every user's domain."""
-    domains = {settings["ns_host"], *(user_domain(settings, u) for u in users)}
+    """Domains reserved for the placeholder, nameserver, or existing users."""
+    domains = {placeholder_domain(settings), settings["ns_host"],
+               *(user_domain(settings, u) for u in users)}
     return {d.rstrip(".") for d in domains}
 
 
@@ -239,7 +244,7 @@ def render_server_config(settings, users):
     domains = [user_domain(settings, u) for u in users
                if u.get("enabled", True) and not user_expired(u)]
     if not domains:  # keep the service able to start before the first user
-        domains = [f"setup.{settings['base_domain']}"]
+        domains = [placeholder_domain(settings)]
     domain_list = "[" + ", ".join(f'"{d}"' for d in domains) + "]"
     text = re.sub(r'^DOMAIN\s*=.*$', f"DOMAIN = {domain_list}",
                   text, count=1, flags=re.M)

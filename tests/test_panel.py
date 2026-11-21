@@ -63,7 +63,75 @@ class ExpiryTests(unittest.TestCase):
         with open(self.app.SERVER_CONFIG) as fh:
             config = fh.read()
         self.assertNotIn("expires.example.com", config)
-        self.assertIn('DOMAIN = ["setup.example.com"]', config)
+        self.assertIn('DOMAIN = ["no-active-users-placeholder.example.com"]', config)
+
+    def test_disabling_or_deleting_setup_domain_revokes_access(self):
+        cases = [(fields, op) for fields in (
+            {"slug": "setup"}, {"slug": "legacy", "custom_domain": "setup.example.com"})
+                 for op in ("toggle", "delete")]
+        for fields, op in cases:
+            with self.subTest(fields=fields, op=op):
+                user = {"id": "legacy", "enabled": True, **fields}
+                self.app.save_users([user])
+                self.assertTrue(self.app.sync_server())
+                with open(self.app.SERVER_CONFIG) as fh:
+                    self.assertIn('DOMAIN = ["setup.example.com"]', fh.read())
+                handler = mock.Mock()
+                form = mock.Mock()
+                form.getvalue.side_effect = {"id": "legacy", "op": op}.get
+                self.app.Handler._user_action(handler, form)
+                self.assertTrue(self.app.LAST_SYNC["ok"])
+                with open(self.app.SERVER_CONFIG) as fh:
+                    domain_line = next(line for line in fh if line.startswith("DOMAIN ="))
+                self.assertNotIn('"setup.example.com"', domain_line)
+
+    def test_setup_name_gets_non_placeholder_domain(self):
+        settings = self.app.load_settings()
+        settings["ns_host"] = "ns.example.com"
+        self.app.save_settings(settings)
+        self.app.save_users([])
+        form = mock.Mock()
+        form.getvalue.side_effect = {"name": "Setup"}.get
+        form.getlist.return_value = []
+        self.app.Handler._user_create(mock.Mock(), form)
+        self.assertEqual(self.app.load_users()[0]["slug"], "setup")
+
+    def test_placeholder_custom_domain_is_rejected(self):
+        settings = self.app.load_settings()
+        settings["ns_host"] = "ns.example.com"
+        self.app.save_settings(settings)
+        self.app.save_users([])
+        form = mock.Mock()
+        form.getvalue.side_effect = {
+            "name": "Custom", "custom_domain": "no-active-users-placeholder.example.com"}.get
+        form.getlist.return_value = []
+        handler = mock.Mock()
+        self.app.Handler._user_create(handler, form)
+        handler._send.assert_called_once_with(mock.ANY, status=400)
+        self.assertEqual(self.app.load_users(), [])
+
+    def test_deleting_last_active_user_does_not_restore_deleted_domain(self):
+        self.app.save_users([
+            {"id": "disabled", "slug": "setup", "enabled": False},
+            {"id": "active", "slug": "setup-2", "enabled": True},
+        ])
+        self.assertTrue(self.app.sync_server())
+        with open(self.app.SERVER_CONFIG) as fh:
+            self.assertIn('DOMAIN = ["setup-2.example.com"]', fh.read())
+        form = mock.Mock()
+        form.getvalue.side_effect = {"id": "active", "op": "delete"}.get
+        self.app.Handler._user_action(mock.Mock(), form)
+        self.assertTrue(self.app.LAST_SYNC["ok"])
+        with open(self.app.SERVER_CONFIG) as fh:
+            self.assertIn('DOMAIN = ["no-active-users-placeholder.example.com"]', fh.read())
+
+    def test_placeholder_cannot_be_generated_by_slugify(self):
+        label = "no-active-users-placeholder"
+        self.assertNotEqual(self.app.slugify(label), label)
+        self.app.save_users([])
+        self.assertTrue(self.app.sync_server())
+        with open(self.app.SERVER_CONFIG) as fh:
+            self.assertIn('DOMAIN = ["no-active-users-placeholder.example.com"]', fh.read())
 
     def test_unchanged_config_does_not_sync_or_restart(self):
         with mock.patch.object(self.app, "sync_server") as sync, \
