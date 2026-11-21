@@ -65,6 +65,56 @@ class ExpiryTests(unittest.TestCase):
         self.assertNotIn("expires.example.com", config)
         self.assertIn('DOMAIN = ["setup.example.com"]', config)
 
+    def test_concurrent_creates_preserve_both_users(self):
+        settings = self.app.load_settings()
+        settings["ns_host"] = "ns.example.com"
+        self.app.save_settings(settings)
+        self.app.save_users([])
+        load_users, save_users = self.app.load_users, self.app.save_users
+        first_loaded = threading.Event()
+        second_loaded = threading.Event()
+        first_saved = threading.Event()
+        errors = []
+
+        def load():
+            users = load_users()
+            if threading.current_thread().name == "first-create":
+                first_loaded.set()
+                second_loaded.wait(timeout=0.5)
+            else:
+                second_loaded.set()
+                if not first_saved.wait(timeout=5):
+                    raise RuntimeError("first create did not save")
+            return users
+
+        def save(users):
+            save_users(users)
+            first_saved.set()
+
+        def create(name):
+            try:
+                handler = self.app.Handler.__new__(self.app.Handler)
+                handler._redirect = mock.Mock()
+                form = self.app.FormData.__new__(self.app.FormData)
+                form.data = {"name": [name]}
+                handler._user_create(form)
+            except Exception as exc:
+                errors.append(exc)
+
+        with mock.patch.object(self.app, "load_users", side_effect=load), \
+                mock.patch.object(self.app, "save_users", side_effect=save), \
+                mock.patch.object(self.app, "sync_server"):
+            first = threading.Thread(target=create, args=("First",), name="first-create")
+            second = threading.Thread(target=create, args=("Second",), name="second-create")
+            first.start()
+            self.assertTrue(first_loaded.wait(timeout=5))
+            second.start()
+            first.join(timeout=10)
+            second.join(timeout=10)
+            self.assertFalse(first.is_alive() or second.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual({u["name"] for u in load_users()}, {"First", "Second"})
+
     def test_unchanged_config_does_not_sync_or_restart(self):
         with mock.patch.object(self.app, "sync_server") as sync, \
                 mock.patch.object(self.app.subprocess, "run") as restart:

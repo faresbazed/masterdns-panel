@@ -137,7 +137,8 @@ def load_users():
 
 
 def save_users(users):
-    _save_json(USERS_FILE, users)
+    with SYNC_LOCK:
+        _save_json(USERS_FILE, users)
 
 
 def hash_password(password, salt=None):
@@ -723,6 +724,10 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- admin actions ---------------------------------------------------------
     def _user_create(self, form):
+        with SYNC_LOCK:
+            return self._user_create_locked(form)
+
+    def _user_create_locked(self, form):
         settings = load_settings()
         users = load_users()
         name = (form.getvalue("name") or "").strip()
@@ -759,26 +764,28 @@ class Handler(BaseHTTPRequestHandler):
         return self._redirect("/admin")
 
     def _user_update(self, form):
-        users = load_users()
-        uid = form.getvalue("id")
-        for user in users:
-            if user["id"] == uid:
-                user["resolvers"] = parse_resolvers(form)
-        save_users(users)
-        sync_server(restart=False)  # links only; resolvers live client-side
+        with SYNC_LOCK:
+            users = load_users()
+            uid = form.getvalue("id")
+            for user in users:
+                if user["id"] == uid:
+                    user["resolvers"] = parse_resolvers(form)
+            save_users(users)
+            sync_server(restart=False)  # links only; resolvers live client-side
         return self._redirect("/admin")
 
     def _user_action(self, form):
-        users = load_users()
-        uid, op = form.getvalue("id"), form.getvalue("op")
-        if op == "delete":
-            users = [u for u in users if u["id"] != uid]
-        elif op == "toggle":
-            for user in users:
-                if user["id"] == uid:
-                    user["enabled"] = not user.get("enabled", True)
-        save_users(users)
-        sync_server()
+        with SYNC_LOCK:
+            users = load_users()
+            uid, op = form.getvalue("id"), form.getvalue("op")
+            if op == "delete":
+                users = [u for u in users if u["id"] != uid]
+            elif op == "toggle":
+                for user in users:
+                    if user["id"] == uid:
+                        user["enabled"] = not user.get("enabled", True)
+            save_users(users)
+            sync_server()
         return self._redirect("/admin")
 
     def _settings_save(self, form):
@@ -867,8 +874,9 @@ def cmd_init(args):
         "installed_at": time.strftime("%Y-%m-%d %H:%M"),
     }
     save_settings(settings)
-    if not os.path.exists(USERS_FILE):
-        save_users([])
+    with SYNC_LOCK:
+        if not os.path.exists(USERS_FILE):
+            save_users([])
     sync_server(restart=False)
     print(f"Panel initialised. Base domain: {settings['base_domain']}  "
           f"Nameserver: {settings['ns_host']}  Encryption: {ENC_NAMES[method]}")
